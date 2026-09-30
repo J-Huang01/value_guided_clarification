@@ -10,6 +10,8 @@ from openai import AsyncOpenAI
 
 TRAVEL_ENVS = ['travel22', 'travel33', 'travel44', 'travel233', 'travel333', 'travel334', 'travel444', 'travel2222']
 TRAIN_ENVS = TRAVEL_ENVS + ['turtle']
+HELD_OUT_ENVS = ['intention', 'telepathy']
+TITLE_KEYED = ('turtle', 'telepathy')
 EPISODE_STEPS = 16
 _errors = contextvars.ContextVar('simulator_errors', default=None)
 
@@ -25,7 +27,7 @@ def load_tasks(userrl_root, env_name, split):
     tasks = []
     for i in range(len(df)):
         reward_model = dict(df.iloc[i]['reward_model'])
-        gold = reward_model.get('title') if env_name == 'turtle' else reward_model.get('id', i)
+        gold = reward_model.get('title') if env_name in TITLE_KEYED else reward_model.get('id', i)
         tasks.append(dict(env_name=env_name, gold=str(gold), messages=[dict(m) for m in list(df.iloc[i]['prompt'])]))
     return tasks
 
@@ -147,6 +149,14 @@ class UserGym:
             config = turtlegym.get_default_config()
             config.success_threshold = 1.0
             env_class = turtlegym.StoryEnv
+        elif name == 'intention':
+            import intentiongym
+            config = intentiongym.get_default_config()
+            env_class = intentiongym.IntentionEnv
+        elif name == 'telepathy':
+            import telepathygym
+            config = telepathygym.get_default_config()
+            env_class = telepathygym.TelepathyEnv
         else:
             raise ValueError('unsupported UserGym environment: ' + name)
         config.max_steps = max_steps

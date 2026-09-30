@@ -4,18 +4,20 @@ import hashlib
 import json
 import os
 
+from benchmarks import JudgeFailure
 from benchmarks import askbench as ab
+from benchmarks import tau2 as t2
 from benchmarks import usergym as ug
 
 JUDGE_RETRIES = 3
 
 
-class JudgeFailure(RuntimeError):
-    pass
-
 
 def fingerprint(task, dataset):
-    text = task['q0'] if dataset in ab.ASKBENCH_DATASETS else ug.flatten(task['messages'])
+    if dataset == 'tau2':
+        text = f"{task['env_name']}|{task['gold']}"
+    else:
+        text = task['q0'] if dataset in ab.ASKBENCH_DATASETS else ug.flatten(task['messages'])
     return hashlib.sha256(' '.join(text.split()).encode()).hexdigest()
 
 
@@ -44,10 +46,19 @@ def load_splits(args):
         train = ab.load_tasks(os.path.join(data_dir, 'train.jsonl'), dataset)
         dev = ab.load_tasks(os.path.join(data_dir, 'dev.jsonl'), dataset)
         test = ab.load_tasks(os.path.join(data_dir, 'test.jsonl'), dataset)
+    elif dataset == 'tau2':
+        pool, test = [], []
+        for domain in args.tau2_domains:
+            pool.extend(t2.load_tasks(domain, 'train'))
+            test.extend(t2.load_tasks(domain, 'test'))
+        train, dev = [], []
+        for t in pool:
+            (dev if int(fingerprint(t, dataset)[:8], 16) % 10 == 0 else train).append(t)
     else:
         pool, test = [], []
         for name in ug.TRAIN_ENVS:
             pool.extend(ug.load_tasks(args.userrl_root, name, 'train'))
+        for name in ug.TRAIN_ENVS + ug.HELD_OUT_ENVS:
             test.extend(ug.load_tasks(args.userrl_root, name, 'test'))
         train, dev = [], []
         for t in pool:
@@ -64,8 +75,12 @@ class Bench:
     def __init__(self, args, actor):
         self.dataset, self.actor = args.dataset, actor
         self.ask = args.dataset in ab.ASKBENCH_DATASETS
-        if self.ask:
-            self.limit = ab.EPISODE_TURNS
+        self.episodic = args.dataset == 'tau2'
+        if self.episodic:
+            self.limit = t2.MAX_STEPS // 2
+            self.env = t2.Tau2(actor, args.user_url, args.user_model)
+        elif self.ask:
+            self.limit = ab.EPISODE_TURNS[args.dataset]
             self.env = ab.AskBench(args.dataset, args.askbench_root, args.user_url, args.user_model)
         else:
             self.limit = ug.EPISODE_STEPS
@@ -75,7 +90,8 @@ class Bench:
         env = None if self.ask else self.env.build_env(task, self.limit)
         messages = [{'role': 'user', 'content': task['q0']}] if self.ask else copy.deepcopy(task['messages'])
         return dict(task=task, env=env, messages=messages, turn=0, done=False, asked=[], queries=0,
-                    native_queries=0, reward=0.0, correct=None, missing=list(task.get('required', [])), turns=[])
+                    native_queries=0, reward=0.0, correct=None, missing=list(task.get('required', [])), turns=[],
+                    step_rewards=[])
 
     def fork(self, state):
         return copy.deepcopy(state)
@@ -121,7 +137,8 @@ class Bench:
         choice, content, call = ('action', text, None) if label is not None else ug.parse_tool_call(text)
         if label is None:
             state['native_queries'] += int(ug.is_question(choice, content))
-        obs, _, terminated, truncated, _ = await self.env.env_step(state['env'], f'[{choice}] {content}')
+        obs, step_reward, terminated, truncated, _ = await self.env.env_step(state['env'], f'[{choice}] {content}')
+        state['step_rewards'].append(float(step_reward or 0.0))
         feedback = str(obs.get('feedback', ''))
         if call:
             call_id = f"call_{state['turn']}"
@@ -175,6 +192,18 @@ class Bench:
         state['messages'].append(dict(role='user', content=reply))
 
     def result(self, state):
-        return dict(uid=state['task']['uid'], reward=state['reward'], correct=state['correct'],
+        env_name = state['task'].get('env_name', self.dataset)
+        steps = state.get('step_rewards') or [0.0]
+        pass1 = max(steps) if 'travel' in env_name else sum(steps)
+        extra = {}
+        if self.dataset == 'in3':
+            task = state['task']
+            weights = task.get('importance') or {}
+            total = sum(weights.get(r, 1) for r in task['required'])
+            resolved = sum(weights.get(r, 1) for r in task['required'] if r not in state['missing'])
+            extra = dict(vague=task['vague'], asked=bool(state['queries'] + state['native_queries']),
+                         recover=resolved / total if (task['vague'] and total) else None)
+        return dict(uid=state['task']['uid'], env_name=env_name, pass1=pass1 if not self.ask else None, **extra,
+                    reward=state['reward'], correct=state['correct'],
                     coverage=state.get('coverage', 0.0), info=state.get('info', 0.0), queries=state['queries'],
                     native_queries=state['native_queries'], turns=state['turn'], trace=state['turns'])

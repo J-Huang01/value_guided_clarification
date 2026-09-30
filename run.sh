@@ -13,7 +13,8 @@ CUDA_VISIBLE_DEVICES=$AGENT_DEVICES VLLM_ALLOW_RUNTIME_LORA_UPDATING=True vllm s
     --gpu-memory-utilization 0.4 --max-num-batched-tokens 4096 --enable-lora --max-loras 2 ${AGENT_SERVE_ARGS:-} \
     > "$OUT/agent_server.log" 2>&1 &
 AGENT_PID=$!
-CUDA_VISIBLE_DEVICES=$USER_DEVICES vllm serve "$USER_MODEL" --port "$USER_PORT" --max-model-len 16384 ${USER_SERVE_ARGS:-} \
+CUDA_VISIBLE_DEVICES=$USER_DEVICES vllm serve "$USER_MODEL" --port "$USER_PORT" --max-model-len 32768 \
+    --enable-auto-tool-choice --tool-call-parser hermes ${USER_SERVE_ARGS:-} \
     > "$OUT/user_server.log" 2>&1 &
 USER_PID=$!
 trap 'kill $AGENT_PID $USER_PID 2>/dev/null || true' EXIT

@@ -71,11 +71,15 @@ Get each benchmark from its page below and place it under `third_party/` (for ex
 | AskMind | `ask_mind` | [link](https://github.com/jialeuuz/askbench) |
 | AskOverconfidence | `ask_overconfidence` | [link](https://github.com/jialeuuz/askbench) |
 | UserGym | `usergym` | [link](https://github.com/SalesforceAIResearch/UserRL) |
-| IN3 | | [link](https://huggingface.co/datasets/hbx/IN3) |
-| tau2-bench | | [link](https://github.com/sierra-research/tau2-bench) |
+| IN3 | `in3` | [data](https://huggingface.co/datasets/hbx/IN3), [harness](https://github.com/jialeuuz/askbench) |
+| tau2-bench | `tau2` | [link](https://github.com/sierra-research/tau2-bench) |
 
-For datasets distributed as a task pool and a test file, `cleat/make_splits.py` builds the train, development
-and test splits and removes pool tasks that also appear in the test set.
+For `usergym`, the agent is trained on Travel and Turtle, and evaluation also covers the held-out Intention and
+Telepathy environments with the same agent and controller.
+
+The UserGym and tau2-bench environments are installed as Python packages following the instructions on their
+pages. For datasets distributed as a task pool and a test file, `cleat/make_splits.py` builds the train, development and
+test splits and removes pool tasks that also appear in the test set.
 
 ## Quick start
 
@@ -111,3 +115,7 @@ variables at the top of `run.sh`. The defaults are the settings reported in the 
 | `cleat/math_core.py` | guided sampling, inclusion probabilities, advantages and the decision rule |
 | `cleat/environment.py` | benchmark interaction and task splits |
 | `cleat/benchmarks/` | benchmark-specific task loading, judge and user simulation |
+
+## License
+
+This code is released under the MIT License. See `LICENSE`.

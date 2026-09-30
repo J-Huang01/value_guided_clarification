@@ -89,20 +89,26 @@ class Experiment:
 
     async def collect_group(self, task, seed, warmup=False):
         rng = np.random.default_rng(seed)
-        root = self.bench.initial(task)
-        for _ in range(int(rng.integers(self.a.prefix_max + 1))):
+        if self.bench.episodic:
+            root = await self.bench.env.root(task, int(rng.integers(2 ** 31)))
+            labels = await self.actor.propose(root['messages'], [])
+            budget = self.bench.limit
+        else:
+            root = self.bench.initial(task)
+            for _ in range(int(rng.integers(self.a.prefix_max + 1))):
+                if root['done']:
+                    break
+                before = self.bench.fork(root)
+                await self.policy_turn(root, rng)
+                if root['done']:
+                    root = before
+                    break
             if root['done']:
-                break
-            before = self.bench.fork(root)
-            await self.policy_turn(root, rng)
-            if root['done']:
-                root = before
-                break
-        if root['done']:
-            return dict(terminal_prefix=True, uid=task['uid'], result=self.bench.result(root))
-        labels = await self.bench.labels(root)
+                return dict(terminal_prefix=True, uid=task['uid'], result=self.bench.result(root))
+            labels = await self.bench.labels(root)
+            budget = self.bench.limit - root['turn']
         pi, menu = await self.actor.score_menu(root['messages'], labels, True)
-        values = self.actor.values(root['messages'], labels, self.bench.limit - root['turn'])
+        values = self.actor.values(root['messages'], labels, budget)
         beta = 0.0 if warmup or self.a.variant == 'no_guidance' else self.a.beta
         shaped = guidance(values, self.a.guide_scale) if beta else values
         arms, rho, bar, mu = sample_arms(pi, shaped, beta, self.a.epsilon, rng)
@@ -110,7 +116,11 @@ class Experiment:
         for arm, replicas in arms.items():
             for _ in range(replicas):
                 keys.append(arm)
-                jobs.append(self.finish(root, labels, arm, int(rng.integers(2 ** 31))))
+                child_seed = int(rng.integers(2 ** 31))
+                if self.bench.episodic:
+                    jobs.append(self.bench.env.rollout(root, labels[arm] if arm < len(labels) else None, child_seed))
+                else:
+                    jobs.append(self.finish(root, labels, arm, child_seed))
         trajectories = await asyncio.gather(*jobs)
         by_arm = {arm: [] for arm in arms}
         for arm, tr in zip(keys, trajectories):
@@ -118,8 +128,30 @@ class Experiment:
         rewards = {arm: [t['result']['reward'] for t in trs] for arm, trs in by_arm.items()}
         return dict(uid=task['uid'], seed=seed, messages=root['messages'], labels=labels, menu=menu,
                     pi=pi.tolist(), rho=rho.tolist(), bar=bar.tolist(), mu=mu.tolist(), predictions=values.tolist(),
-                    rewards=rewards, trajectories=by_arm, budget=self.bench.limit - root['turn'],
+                    rewards=rewards, trajectories=by_arm, budget=budget,
                     actor_version=self.actor.version, terminal_prefix=False)
+
+    def controller(self):
+        async def decide(dialogue, runner):
+            labels = await self.actor.propose(dialogue, runner.asked)
+            if not labels:
+                return None
+            choice = value_rule(self.actor.values(dialogue, labels, max(self.bench.limit - runner.turns, 1)))
+            if choice == len(labels):
+                runner.stopped = True
+                return None
+            return labels[choice]
+        return decide
+
+    async def run_episode(self, task, seed, beta, greedy, temperature, max_queries):
+        if self.bench.episodic:
+            return await self.bench.env.episode(task, seed, controller=self.controller() if beta else None,
+                                                max_queries=max_queries, greedy=greedy, temperature=temperature)
+        state = self.bench.initial(task)
+        rng = np.random.default_rng(seed)
+        while not state['done']:
+            await self.policy_turn(state, rng, beta=beta, greedy=greedy, temperature=temperature, max_queries=max_queries)
+        return self.bench.result(state)
 
     def records(self, groups):
         records, weights = [], []
@@ -212,17 +244,14 @@ class Experiment:
 
         async def one(beta, i, task):
             async with limit:
-                state = self.bench.initial(task)
-                rng = np.random.default_rng(900000 + i)
                 try:
-                    while not state['done']:
-                        await self.policy_turn(state, rng, beta=beta, greedy=True, max_queries=self.a.max_queries)
+                    result = await self.run_episode(task, 900000 + i, beta, True, 1.0, self.a.max_queries)
                 except JudgeFailure as error:
                     self.judge_failures += 1
                     append(self.out / 'dropped_groups.jsonl', dict(step=self.step, uid=task['uid'], error=repr(error)))
                     return
-                append(self.out / 'eval.jsonl', dict(self.bench.result(state), step=self.step, beta=beta,
-                                                     split='dev', actor_version=self.actor.version))
+                append(self.out / 'eval.jsonl', dict(result, step=self.step, beta=beta, split='dev',
+                                                     actor_version=self.actor.version))
         for beta in (0.0, 1.0):
             await asyncio.gather(*[one(beta, i, task) for i, task in enumerate(self.dev)])
 
@@ -255,8 +284,12 @@ class Experiment:
             raise
 
 
+QUESTION_BUDGET = {'in3': 2, 'usergym': 4, 'tau2': 4}
+
+
 def add_common_args(p):
-    p.add_argument('--dataset', choices=['ask_mind', 'ask_overconfidence', 'usergym'], required=True)
+    p.add_argument('--dataset', choices=['ask_mind', 'ask_overconfidence', 'in3', 'usergym', 'tau2'], required=True)
+    p.add_argument('--tau2-domains', nargs='+', default=['airline', 'retail', 'telecom'])
     p.add_argument('--model', required=True)
     p.add_argument('--served-name', default=None)
     p.add_argument('--agent-url', default=os.environ.get('AGENT_URL', 'http://localhost:8000/v1'))
@@ -273,7 +306,7 @@ def add_common_args(p):
     p.add_argument('--clip', type=float, default=0.2)
     p.add_argument('--kl-coef', type=float, default=0.01)
     p.add_argument('--grad-clip', type=float, default=1.0)
-    p.add_argument('--context-length', type=int, default=8192)
+    p.add_argument('--context-length', type=int, default=None)
     p.add_argument('--max-new-tokens', type=int, default=1024)
     p.add_argument('--logprob-concurrency', type=int, default=6)
     p.add_argument('--eval-tasks', type=int, default=64)
@@ -299,9 +332,11 @@ def parse_args(argv=None):
     p.add_argument('--resume-from', default=None)
     a = p.parse_args(argv)
     if a.max_queries is None:
-        a.max_queries = 4 if a.dataset == 'usergym' else 1
+        a.max_queries = QUESTION_BUDGET.get(a.dataset, 1)
     if a.topm is None:
         a.topm = 6
+    if a.context_length is None:
+        a.context_length = 16384 if a.dataset == 'tau2' else 8192
     if a.steps < 1 or a.warmup_steps < 1 or not 0 < a.epsilon <= 1:
         p.error('need at least one training step, one warm-up step and epsilon in (0, 1]')
     return a

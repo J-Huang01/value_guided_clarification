@@ -1,0 +1,2 @@
+class JudgeFailure(RuntimeError):
+    pass

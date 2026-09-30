@@ -5,7 +5,7 @@ import random
 
 
 def question(row):
-    text = row.get('overconfidence_question') or row.get('degraded_question') or row.get('ori_question') or ''
+    text = row.get('overconfidence_question') or row.get('degraded_question') or row.get('ori_question') or row.get('task') or ''
     return ' '.join(str(text).split())
 
 
@@ -22,24 +22,28 @@ def write(path, rows):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--dataset', choices=['ask_mind', 'ask_overconfidence'], required=True)
+    p.add_argument('--dataset', choices=['ask_mind', 'ask_overconfidence', 'in3'], required=True)
     p.add_argument('--pool', required=True)
     p.add_argument('--test', required=True)
     p.add_argument('--out-dir', default='data')
-    p.add_argument('--train-size', type=int, default=2000)
+    p.add_argument('--train-size', type=int, default=0)
     p.add_argument('--dev-size', type=int, default=200)
     p.add_argument('--seed', type=int, default=0)
     a = p.parse_args()
     test = read(a.test)
-    held_out = {question(r) for r in test} | {' '.join(str(r.get('ori_question', '')).split()) for r in test}
+    def keys(row):
+        return {k for k in (question(row), ' '.join(str(row.get('ori_question', '')).split())) if k}
+    held_out = set().union(*[keys(r) for r in test])
     seen, pool = set(), []
     for row in read(a.pool):
         q = question(row)
-        if q and q not in held_out and q not in seen and ' '.join(str(row.get('ori_question', '')).split()) not in held_out:
+        if q and q not in seen and not keys(row) & held_out:
             seen.add(q)
             pool.append(row)
     random.Random(a.seed).shuffle(pool)
-    if len(pool) < a.train_size + a.dev_size:
+    if a.train_size <= 0:
+        a.train_size = len(pool) - a.dev_size
+    if len(pool) < a.train_size + a.dev_size or a.train_size <= 0:
         raise SystemExit(f'pool has {len(pool)} usable tasks, fewer than train + dev')
     out = os.path.join(a.out_dir, a.dataset)
     os.makedirs(out, exist_ok=True)

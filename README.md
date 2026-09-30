@@ -1,22 +1,57 @@
-# CLEAT
+# CLEAT: Learning Value-Guided Clarification for Interactive Agents
 
-Code for CLEAT, a method that trains a language-model agent to ask clarifying questions together with a
-lightweight controller that decides when a question is worth asking and what to ask about.
+LLM agents can execute increasingly complex tasks, but effective assistance also requires aligning their actions
+with goals and constraints that users leave unstated. A clarifying question is useful only when the agent can turn
+the answer into a better decision, and that changes as the agent learns.
+
+**CLEAT** (CLarification through valuE-guided Agent co-Training) co-trains a clarification-value controller and the
+task policy from shared interaction outcomes. The controller predicts the **residual query value**, the task utility
+gained by asking a question rather than proceeding under the current policy, estimated from paired rollouts that
+start from the same interaction history. The same paired returns train the policy to select useful questions and act
+on the answers, and outcomes from the updated agent provide fresh value labels, so the clarification guidance adapts
+as the agent improves.
+
+<p align="center"><img src="assets/overview.png" width="95%"></p>
 
 ## Overview
 
-The agent and the controller are trained jointly in a single online loop.
+1. **Value-guided rollout allocation.** A fixed constructor proposes candidate clarification targets for the current
+   history. Targets with high predicted residual query value are prioritised, with coverage sampling for exploration.
+2. **Learning from paired outcomes.** For each selected target, a QUERY branch (ask, then continue) and a PASS branch
+   (hand control to the task policy) are rolled out from the same history, with the same user goal and the same agent.
+3. **Online co-training.** The controller is refit on the paired targets, and the policy is updated with
+   PASS-referenced advantages and a correction for how each target was sampled.
 
-1. **Propose.** At each decision point the frozen backbone lists a few clarification targets.
-2. **Contrast.** A rollout group compares asking about a target with letting the agent continue on its own.
-   Exploration favours targets the controller currently rates highly.
-3. **Fit the controller.** The controller regresses the residual value of asking, that is the return after
-   asking minus the return without asking, under the current agent.
-4. **Update the agent.** The agent is updated with advantages measured against the no-question continuations,
-   so it learns from the same contrast the controller is fitted on.
+At inference the controller asks about the target with the highest predicted value when that value is positive, and
+otherwise hands control to the task policy.
 
-At inference the controller asks about the highest-value target whenever that value is positive, and otherwise
-lets the agent continue on its own for the rest of the episode.
+## Results
+
+With Qwen3-4B, CLEAT achieves the highest mean score in all ten evaluation settings across four benchmarks (mean over
+3 seeds; Intention reports cumulative credits, all other columns are percentages).
+
+| Method | Travel | Turtle | Inten. | Tele. | Airline | Retail | Telecom | IN3 Judg.Acc | AskMind | AskOv. |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Vanilla | 26.74 | 17.97 | 185.50 | 49.12 | 23.78 | 20.89 | 20.00 | 65.74 | 38.70 | 57.24 |
+| GRPO | 42.26 | 28.96 | 196.42 | 54.85 | 24.33 | 27.50 | 24.17 | 66.05 | 39.65 | 58.67 |
+| Strongest baseline | 50.48 | 28.96 | 200.00 | 54.85 | 33.33 | 30.02 | 24.17 | 77.47 | 46.32 | 60.15 |
+| **CLEAT** | **63.72** | **29.79** | **209.17** | **57.67** | **35.00** | **32.50** | **24.94** | **83.95** | **48.37** | **61.27** |
+
+The strongest baseline is taken per column over prompting-based (ReAct, Reflexion, Proactive CoT, PRIME),
+threshold-based (CLAM, INTENT-SIM, VoI-Gate), information-based (IG-Reward, InfoPO, IGPO) and outcome-based
+(SFT, GRPO) methods. Travel, Turtle, Intention and Telepathy are UserGym; Airline, Retail and Telecom are tau2-bench.
+The gains over the strongest baseline reach 13.24 points on Travel and 6.48 points on IN3 judgment accuracy.
+
+<table>
+<tr>
+<td width="50%" align="center"><img src="assets/coverage.png" width="95%"></td>
+<td width="50%" align="center"><img src="assets/scaling.png" width="95%"></td>
+</tr>
+<tr>
+<td align="center">Complete clarification coverage on AskBench and instruction recovery on IN3.</td>
+<td align="center">Answer accuracy and clarification coverage across backbone sizes, with gains over the stronger baseline.</td>
+</tr>
+</table>
 
 ## Requirements
 
